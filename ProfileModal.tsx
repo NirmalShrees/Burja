@@ -41,7 +41,7 @@ interface ProfileModalProps {
 const FESTIVAL_AVATARS = ['🎲', '👑', '🦁', '🦚', '🐯', '🏔️', '🪔', '⚡', '🏆', '💎', '🚩', '🐅'];
 
 const AVAILABLE_TITLES = [
-  { id: 'Festival Patron', name: 'Festival Patron', icon: '👑', desc: 'Distinguished Game Patron' },
+  { id: 'Festival Player', name: 'Festival Player', icon: '👑', desc: 'Distinguished Game Player' },
   { id: 'Dice Novice', name: 'Dice Novice', icon: '🎲', desc: 'Aspiring Dice Roller' },
   { id: 'Royal High Roller', name: 'Royal High Roller', icon: '💎', desc: 'High Stakes Master' },
   { id: 'Lakhpati', name: 'Lakhpati', icon: '💰', desc: 'Wealth & Prosperity' },
@@ -64,7 +64,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [isEditingName, setIsEditingName] = useState(false);
 
   // Title expansion and custom title state
-  const currentTitle = user.equipped?.title || 'Festival Patron';
+  const currentTitle = user.equipped?.title || 'Festival Player';
   const isPredefinedTitle = AVAILABLE_TITLES.some((t) => t.id === currentTitle);
   const [showMoreTitles, setShowMoreTitles] = useState(false);
   const [customTitleInput, setCustomTitleInput] = useState(isPredefinedTitle ? '' : currentTitle);
@@ -504,7 +504,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                 <span>Player Title</span>
               </label>
               <span className="text-[10px] text-amber-200/90 font-serif truncate max-w-[160px]">
-                {user.equipped?.title || 'Festival Patron'}
+                {user.equipped?.title || 'Festival Player'}
               </span>
             </div>
 
@@ -610,7 +610,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   );
                 }
 
-                const isSelected = !isCustomTitleActive && (user.equipped?.title || 'Festival Patron') === titleObj.id;
+                const isSelected = !isCustomTitleActive && (user.equipped?.title || 'Festival Player') === titleObj.id;
                 return (
                   <button
                     key={titleObj.id}

@@ -49,6 +49,16 @@ async function startServer() {
     res.json({ rooms });
   });
 
+  app.all('/api/tables/cleanup', async (req, res) => {
+    try {
+      await gameEngine.purgeZeroPlayerTables();
+      const activeRooms = gameEngine.getPublicRooms();
+      res.json({ success: true, message: 'Purged redundant tables from Supabase', activeRoomsCount: activeRooms.length });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Failed to cleanup tables' });
+    }
+  });
+
   app.get('/api/user/:id', (req, res) => {
     const user = db.getUser(req.params.id);
     if (!user) {
@@ -293,6 +303,82 @@ async function startServer() {
       gameEngine.sendReaction(payload.roomId, payload.sender, payload.emoji);
     });
 
+    // --- Real-Time Voice Chat Signaling & Audio Relay ---
+    socket.on('voice:join', (payload: { roomId: string; user: { id: string; username: string; avatar: string } }, callback) => {
+      if (!payload?.roomId || !payload?.user?.id) return;
+      const voiceRoomKey = `voice:${payload.roomId}`;
+      socket.join(voiceRoomKey);
+
+      // Get existing sockets in this voice room
+      const existingVoiceSockets = Array.from(io.sockets.adapter.rooms.get(voiceRoomKey) || [])
+        .filter((sid) => sid !== socket.id);
+
+      // Notify others that a new peer joined voice
+      socket.to(voiceRoomKey).emit('voice:user_joined', {
+        socketId: socket.id,
+        userId: payload.user.id,
+        username: payload.user.username,
+        avatar: payload.user.avatar,
+      });
+
+      if (typeof callback === 'function') {
+        callback({
+          success: true,
+          peerSocketIds: existingVoiceSockets,
+        });
+      }
+    });
+
+    socket.on('voice:leave', (payload: { roomId: string; userId: string }) => {
+      if (!payload?.roomId) return;
+      const voiceRoomKey = `voice:${payload.roomId}`;
+      socket.leave(voiceRoomKey);
+      socket.to(voiceRoomKey).emit('voice:user_left', {
+        socketId: socket.id,
+        userId: payload.userId || currentUserId,
+      });
+    });
+
+    socket.on('voice:signal', (payload: { toSocketId: string; signalData: any; fromUserId?: string; fromUsername?: string }) => {
+      if (!payload?.toSocketId) return;
+      io.to(payload.toSocketId).emit('voice:signal', {
+        fromSocketId: socket.id,
+        fromUserId: payload.fromUserId || currentUserId,
+        fromUsername: payload.fromUsername,
+        signalData: payload.signalData,
+      });
+    });
+
+    socket.on('voice:speaking', (payload: { roomId: string; userId: string; isSpeaking: boolean; volume?: number }) => {
+      if (!payload?.roomId) return;
+      socket.to(`voice:${payload.roomId}`).emit('voice:user_speaking', {
+        userId: payload.userId,
+        socketId: socket.id,
+        isSpeaking: payload.isSpeaking,
+        volume: payload.volume ?? 0,
+      });
+    });
+
+    socket.on('voice:mute_state', (payload: { roomId: string; userId: string; isMuted: boolean; isDeafened?: boolean }) => {
+      if (!payload?.roomId) return;
+      socket.to(`voice:${payload.roomId}`).emit('voice:user_mute_state', {
+        userId: payload.userId,
+        socketId: socket.id,
+        isMuted: payload.isMuted,
+        isDeafened: payload.isDeafened ?? false,
+      });
+    });
+
+    // Ultra-reliable low-latency audio chunk relay (handles NAT/firewall peer connection fallbacks)
+    socket.on('voice:audio_stream', (payload: { roomId: string; userId: string; username: string; audioData: string }) => {
+      if (!payload?.roomId || !payload.audioData) return;
+      socket.to(`voice:${payload.roomId}`).emit('voice:incoming_audio', {
+        fromUserId: payload.userId,
+        fromUsername: payload.username,
+        audioData: payload.audioData,
+      });
+    });
+
     // Real-time ping latency check
     socket.on('ping_check', (clientTimestamp: number, callback) => {
       if (typeof callback === 'function') {
@@ -302,6 +388,10 @@ async function startServer() {
 
     socket.on('disconnect', () => {
       if (currentRoomId && currentUserId) {
+        socket.to(`voice:${currentRoomId}`).emit('voice:user_left', {
+          socketId: socket.id,
+          userId: currentUserId,
+        });
         gameEngine.handlePlayerDisconnect(currentRoomId, currentUserId);
       }
     });

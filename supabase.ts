@@ -176,30 +176,68 @@ export async function deleteTableFromSupabase(roomId: string): Promise<boolean> 
 }
 
 /**
- * Sweeps Supabase and purges all table entries that have 0 players or are empty/closed.
+ * Sweeps Supabase and purges all redundant table entries:
+ * 1. Tables with 0 or null players or status 'closed'
+ * 2. Unused system lobby tables
+ * 3. Orphaned tables not present in active memory rooms
  */
-export async function deleteZeroPlayerTablesFromSupabase(): Promise<number> {
+export async function deleteZeroPlayerTablesFromSupabase(activeRoomIds?: string[]): Promise<number> {
   const sb = getSupabaseServerClient();
   if (!sb) return 0;
 
   try {
-    // Delete tables where player_count is 0 or less, is null, or status is 'closed' (excluding system lobby)
-    const { data, error } = await sb
+    let totalPurged = 0;
+
+    // 1. Delete tables where player_count is 0 or less, is null, or status is 'closed'
+    const { data: zeroData, error: zeroErr } = await sb
       .from('game_tables')
       .delete()
       .or('player_count.lte.0,status.eq.closed,player_count.is.null')
-      .neq('id', 'public-royal-table')
       .select('id');
 
-    if (error) {
-      console.warn('[Server Supabase] deleteZeroPlayerTablesFromSupabase notice:', error.message);
-      return 0;
+    if (!zeroErr && zeroData) {
+      totalPurged += zeroData.length;
     }
-    const count = data ? data.length : 0;
-    if (count > 0) {
-      console.log(`[Server Supabase] Cleaned up ${count} zero-player tables from Supabase.`);
+
+    // 2. Explicitly remove any legacy or redundant public-royal-table
+    const { data: royalData } = await sb
+      .from('game_tables')
+      .delete()
+      .eq('id', 'public-royal-table')
+      .select('id');
+    if (royalData) {
+      totalPurged += royalData.length;
     }
-    return count;
+
+    // 3. If active room IDs are provided, purge any orphaned table rows not running in memory
+    if (activeRoomIds && Array.isArray(activeRoomIds)) {
+      const { data: allTables } = await sb
+        .from('game_tables')
+        .select('id, player_count, updated_at');
+
+      if (allTables && allTables.length > 0) {
+        const orphanedIds = allTables
+          .filter((t) => !activeRoomIds.includes(t.id))
+          .map((t) => t.id);
+
+        if (orphanedIds.length > 0) {
+          const { data: orphanData } = await sb
+            .from('game_tables')
+            .delete()
+            .in('id', orphanedIds)
+            .select('id');
+
+          if (orphanData) {
+            totalPurged += orphanData.length;
+          }
+        }
+      }
+    }
+
+    if (totalPurged > 0) {
+      console.log(`[Server Supabase] Purged ${totalPurged} redundant/unused tables from Supabase.`);
+    }
+    return totalPurged;
   } catch (err) {
     console.warn('[Server Supabase] deleteZeroPlayerTablesFromSupabase exception:', err);
     return 0;
@@ -251,6 +289,11 @@ export async function syncTableStateToSupabaseServer(room: RoomState): Promise<b
 
   try {
     const playersArr = Object.values(room.players || {});
+    if (playersArr.length === 0) {
+      // If table has 0 players remaining, delete it immediately from Supabase
+      await deleteTableFromSupabase(room.id);
+      return true;
+    }
 
     // Compact player stats: easy to inspect in Supabase Table Editor
     const playerStats = playersArr.map((p) => {

@@ -194,7 +194,13 @@ export async function syncTableStateToSupabase(room: RoomState): Promise<{ succe
   }
 
   try {
-    const playersList: TablePlayerRecord[] = Object.values(room.players || {}).map((p) => ({
+    const rawPlayers = Object.values(room.players || {});
+    if (rawPlayers.length === 0) {
+      await deleteTableFromSupabase(room.id);
+      return { success: true };
+    }
+
+    const playersList: TablePlayerRecord[] = rawPlayers.map((p) => ({
       id: p.id,
       username: p.username,
       avatar: p.avatar,
@@ -338,19 +344,31 @@ export async function deleteTableFromSupabase(roomId: string): Promise<{ success
 export async function deleteZeroPlayerTablesFromSupabase(): Promise<number> {
   if (!isSupabaseConfigured() || !supabase) return 0;
   try {
+    let purged = 0;
     const { data, error } = await supabase
       .from('game_tables')
       .delete()
       .or('player_count.lte.0,status.eq.closed,player_count.is.null')
-      .neq('id', 'public-royal-table')
       .select('id');
 
     if (!error && data) {
-      if (data.length > 0) {
-        console.log(`[TableService] Purged ${data.length} zero-player tables from Supabase.`);
-      }
-      return data.length;
+      purged += data.length;
     }
+
+    const { data: royalData } = await supabase
+      .from('game_tables')
+      .delete()
+      .eq('id', 'public-royal-table')
+      .select('id');
+
+    if (royalData) {
+      purged += royalData.length;
+    }
+
+    if (purged > 0) {
+      console.log(`[TableService] Purged ${purged} zero-player/redundant tables from Supabase.`);
+    }
+    return purged;
   } catch (err) {
     console.warn('[TableService] deleteZeroPlayerTablesFromSupabase notice:', err);
   }

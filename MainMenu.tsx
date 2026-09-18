@@ -228,7 +228,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({
 
               <div className="flex items-center gap-1.5 mt-0.5">
                 <span className="text-[9px] text-slate-400 truncate">
-                  {user.equipped?.title || 'Festival Patron'}
+                  {user.equipped?.title || 'Festival Player'}
                 </span>
                 {user.isGuest ? (
                   <button

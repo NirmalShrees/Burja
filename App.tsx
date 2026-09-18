@@ -44,6 +44,8 @@ import { ShopModal } from './components/ShopModal.js';
 import { AuthModal } from './components/AuthModal.js';
 import { GameTableModal, PublicRoomSummary } from './components/GameTableModal.js';
 import { TableStatsModal } from './components/TableStatsModal.js';
+import { VoiceChatBar } from './components/VoiceChatBar.js';
+import { voiceService } from './services/voiceService.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { sound } from './utils/audio.js';
 import {
@@ -585,6 +587,7 @@ export default function App() {
     s.on('connect', () => {
       setIsConnected(true);
       setIsOnline(true);
+      voiceService.setSocket(s);
       measureLatency(s);
 
       s.emit('user:init', { id: user.id }, (res: { success: boolean; user: UserProfile }) => {
@@ -758,7 +761,6 @@ export default function App() {
         if (payload.roomState) {
           setCurrentRoom(payload.roomState);
           currentRoomRef.current = payload.roomState;
-          syncTableStateToSupabase(payload.roomState);
         }
 
         const myId = userRef.current.id;
@@ -806,6 +808,27 @@ export default function App() {
             });
           }
         }
+      }
+    });
+
+    // Synchronized Next Round Voting: Live updates as each player clicks Next Round
+    s.on('game:next_round_votes', (payload: {
+      votes: string[];
+      totalPlayers: number;
+      allReady: boolean;
+      voterId?: string;
+    }) => {
+      if (currentRoomRef.current) {
+        setNextRoundVotes(payload.votes || []);
+        if (payload.voterId === userRef.current.id) {
+          setIsUserReady(true);
+        }
+        setTablePlayers((list) =>
+          list.map((p) => ({
+            ...p,
+            isReady: (payload.votes || []).includes(p.id),
+          }))
+        );
       }
     });
 
@@ -879,7 +902,6 @@ export default function App() {
       if (payload.roomState) {
         setCurrentRoom(payload.roomState);
         currentRoomRef.current = payload.roomState;
-        syncTableStateToSupabase(payload.roomState);
 
         const hostId = payload.roomState.hostId;
         const mapped: TablePlayer[] = Object.values(payload.roomState.players).map((p) => ({
@@ -993,8 +1015,6 @@ export default function App() {
           const botPlayers = smartBotsRef.current.map(smartBotToTablePlayer);
           setTablePlayers([...mapped, ...botPlayers]);
         }
-
-        syncTableStateToSupabase(payload.roomState);
       }
       if (payload?.player && payload.player.id !== userRef.current.id) {
         showToast(`${payload.player.username} joined the table!`, 'info');
@@ -1005,9 +1025,18 @@ export default function App() {
     });
 
     s.on('room:player_left', (payload: { userId: string; roomState: RoomState }) => {
-      if (payload?.roomState) {
+      if (payload.userId === userRef.current.id) {
+        setCurrentRoom(null);
+        currentRoomRef.current = null;
+        setIsInGame(false);
+        setPhase('betting');
+        setMyBets({ jhanda: 0, burja: 0, itta: 0, paan: 0, hukum: 0, chidi: 0 });
+        setIsUserReady(false);
+        setNextRoundVotes([]);
+      } else if (payload?.roomState) {
         setCurrentRoom(payload.roomState);
         currentRoomRef.current = payload.roomState;
+        setNextRoundVotes(payload.roomState.nextRoundVotes || []);
         const hostId = payload.roomState.hostId;
         const mapped: TablePlayer[] = Object.values(payload.roomState.players).map((p) => ({
           id: p.id,
@@ -1015,11 +1044,12 @@ export default function App() {
           avatar: p.avatar,
           coins: p.coins,
           currentBet: p.totalBetThisRound,
-          isReady: p.totalBetThisRound > 0,
+          isReady: (payload.roomState.nextRoundVotes || []).includes(p.id) || p.totalBetThisRound > 0,
           title: p.equipped?.title || 'Player',
           isUser: p.id === userRef.current.id,
           isHost: Boolean(p.isHost || hostId === p.id),
           isBot: false,
+          isDisconnected: Boolean(p.isDisconnected),
           sessionStats: p.sessionStats,
         }));
 
@@ -1029,8 +1059,6 @@ export default function App() {
           const botPlayers = smartBotsRef.current.map(smartBotToTablePlayer);
           setTablePlayers([...mapped, ...botPlayers]);
         }
-
-        syncTableStateToSupabase(payload.roomState);
       }
       s.emit('room:get_public', (res: { rooms: PublicRoomSummary[] }) => {
         if (res?.rooms) setPublicRooms(res.rooms);
@@ -1056,7 +1084,6 @@ export default function App() {
           sessionStats: p.sessionStats,
         }));
         setTablePlayers(mapped);
-        syncTableStateToSupabase(payload.roomState);
       }
 
       if (payload.newHostId === userRef.current.id) {
@@ -1147,6 +1174,8 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      voiceService.leaveVoice();
+      voiceService.setSocket(null);
       s.disconnect();
     };
   }, [user.id]);
@@ -1571,12 +1600,15 @@ export default function App() {
     };
   }, [phase, tablePlayers.length, isConnected, socket]);
 
-  // Advance to next round when ALL active players (user + bots) have voted
+  // Advance to next round when ALL active connected players (user + bots) have voted
   useEffect(() => {
     if (phase !== 'payout') return;
     if (tablePlayers.length === 0) return;
 
-    const allVoted = tablePlayers.every((p) => nextRoundVotes.includes(p.id));
+    const activeConnectedPlayers = tablePlayers.filter((p) => !p.isDisconnected);
+    if (activeConnectedPlayers.length === 0) return;
+
+    const allVoted = activeConnectedPlayers.every((p) => nextRoundVotes.includes(p.id));
     if (allVoted) {
       const timer = setTimeout(() => {
         if (!socket || !isConnected || !currentRoomRef.current) {
@@ -2275,11 +2307,12 @@ export default function App() {
   );
 
   const handleLeaveTable = useCallback(() => {
+    voiceService.leaveVoice();
     if (socket && currentRoom) {
       socket.emit('room:leave', { roomId: currentRoom.id, userId: user.id });
-      // Delete table from Supabase when players become 0 or if host was alone
+      // Delete table from Supabase when players become 0 or if user was the only player
       const otherPlayers = Object.keys(currentRoom.players || {}).filter((id) => id !== user.id);
-      if (otherPlayers.length === 0 && currentRoom.id !== 'public-royal-table') {
+      if (otherPlayers.length === 0) {
         deleteTableFromSupabase(currentRoom.id);
       }
     }
@@ -2317,7 +2350,7 @@ export default function App() {
         smartBotsRef.current = smartBotsRef.current.filter((b) => b.id !== targetUserId);
         setTablePlayers((prev) => prev.filter((p) => p.id !== targetUserId));
         setNextRoundVotes((prev) => prev.filter((id) => id !== targetUserId));
-        showToast('Patron removed from the table.', 'success');
+        showToast('Player removed from the table.', 'success');
         sound.playChipSound();
         return;
       }
@@ -2593,7 +2626,7 @@ export default function App() {
       isReady: isUserReady,
       isUser: true,
       isHost: isMeHost,
-      title: user.equipped?.title || 'Festival Patron',
+      title: user.equipped?.title || 'Festival Player',
     };
 
     const seenIds = new Set<string>();
@@ -2748,7 +2781,7 @@ export default function App() {
             className="flex-1 min-h-0 px-2 sm:px-2.5 pt-1 pb-1 flex flex-col gap-1 sm:gap-1.5 overflow-hidden"
           >
             {/* Active Table Players Pavilion (Compact circular avatars, live countdown, ping latency & ready toggle) */}
-            <div className="shrink-0">
+            <div className="shrink-0 space-y-1">
               <ActivePlayersDeck
                 players={activeTablePlayers}
                 phase={phase}
@@ -2766,6 +2799,16 @@ export default function App() {
                 ping={ping}
                 isConnected={isConnected}
                 isOnline={isOnline}
+              />
+
+              {/* Real-time Voice Chat Bar */}
+              <VoiceChatBar
+                roomId={currentRoom?.id || 'public_table'}
+                currentUser={{
+                  id: user.id || 'user_me',
+                  username: user.username || 'You',
+                  avatar: user.avatar || '🎲',
+                }}
               />
             </div>
 

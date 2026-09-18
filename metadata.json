@@ -1,7 +1,9 @@
 {
   "name": "71Remix Langur Burja",
   "description": "Traditional 3D Langur Burja (Jhandi Munda) game with real-time rolling physics, authentic symbols, and Player \u0026 Host modes.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "microphone"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

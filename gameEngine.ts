@@ -32,47 +32,46 @@ export class GameEngine {
 
   constructor(io: Server) {
     this.io = io;
-    this.createPublicLobby();
     this.hydrateFromSupabase().catch((err) => {
       console.warn('[GameEngine] Background hydration notice:', err);
     });
 
-    // Sweep and purge residual 0-player tables from Supabase on launch and every 3 minutes
+    // Sweep and purge residual 0-player tables from Supabase on launch and every 60 seconds
     this.purgeZeroPlayerTables();
     setInterval(() => {
       this.purgeZeroPlayerTables();
-    }, 3 * 60 * 1000);
+    }, 60 * 1000);
   }
 
   /**
-   * Purges residual 0-player tables from Supabase.
+   * Purges residual 0-player tables and redundant entries from Supabase.
    */
   public async purgeZeroPlayerTables(): Promise<void> {
     try {
-      await deleteZeroPlayerTablesFromSupabase();
+      const activeIds = Array.from(this.rooms.keys());
+      await deleteZeroPlayerTablesFromSupabase(activeIds);
     } catch (err) {
       console.warn('[GameEngine] purgeZeroPlayerTables notice:', err);
     }
   }
 
   /**
-   * Hydrates active and waiting tables from Supabase into memory on server start.
+   * Hydrates active tables from Supabase into memory on server start.
    */
   public async hydrateFromSupabase(): Promise<void> {
     try {
       const records = await fetchActiveTablesFromSupabase();
       if (records && records.length > 0) {
-        console.log(`[GameEngine] Hydrating ${records.length} table(s) from Supabase...`);
         for (const rec of records) {
-          // Immediately purge tables with 0 or negative players
-          if ((rec.player_count || 0) <= 0 && rec.id !== 'public-royal-table') {
+          // Immediately purge tables with 0 or negative players, status closed, or legacy lobby
+          if ((rec.player_count || 0) <= 0 || rec.status === 'closed' || rec.id === 'public-royal-table') {
             deleteTableFromSupabase(rec.id).catch(() => {});
             continue;
           }
           if (!this.rooms.has(rec.id)) {
             this.instantiateRoomFromRecord(rec);
-            // Grant a 30-minute grace period for empty restored tables
-            this.scheduleRoomCleanup(rec.id, 30 * 60 * 1000);
+            // Grant a 10-minute grace period for empty restored tables
+            this.scheduleRoomCleanup(rec.id, 10 * 60 * 1000);
           }
         }
       }
@@ -81,8 +80,7 @@ export class GameEngine {
     }
   }
 
-  public scheduleRoomCleanup(roomId: string, delayMs = 1800000) {
-    if (roomId === 'public-royal-table') return;
+  public scheduleRoomCleanup(roomId: string, delayMs = 600000) {
     this.cancelRoomCleanup(roomId);
     const timeout = setTimeout(() => {
       this.cleanupTimers.delete(roomId);
@@ -228,53 +226,12 @@ export class GameEngine {
     return null;
   }
 
-  /**
-   * Initializes a default public royal table
-   */
-  private createPublicLobby() {
-    const publicRoomId = 'public-royal-table';
-    const publicRoom: RoomState = {
-      id: publicRoomId,
-      code: 'ROYAL1',
-      name: '👑 Royal Court Pavilion',
-      hostId: 'system',
-      isPrivate: false,
-      settings: {
-        minBet: 10,
-        maxBet: 50000,
-        bettingDuration: 18,
-        payoutDuration: 7,
-        autoLoop: true,
-        payoutMultiplierType: 'traditional',
-      },
-      phase: 'betting',
-      timer: 18,
-      phaseEndsAt: Date.now() + 18000,
-      dice: ['burja', 'jhanda', 'burja', 'itta', 'paan', 'chidi'],
-      roundNumber: 1,
-      players: {},
-      tableBets: {
-        jhanda: 0,
-        burja: 0,
-        itta: 0,
-        paan: 0,
-        hukum: 0,
-        chidi: 0,
-      },
-      recentHistory: [
-        { roundNumber: 0, dice: ['burja', 'burja', 'jhanda', 'itta', 'paan', 'chidi'], topSymbol: 'burja' },
-      ],
-    };
-    this.rooms.set(publicRoomId, publicRoom);
-    this.startRoomLoop(publicRoomId);
-  }
-
   public getPublicRooms(): { id: string; name: string; code: string; playerCount: number; phase: string; timer: number }[] {
     const list: { id: string; name: string; code: string; playerCount: number; phase: string; timer: number }[] = [];
     for (const r of this.rooms.values()) {
-      // Only show actual tables created by real players with active players connected
+      // Only show actual tables with active players connected
       const count = Object.keys(r.players || {}).length;
-      if (!r.isPrivate && r.hostId !== 'system' && r.id !== 'public-royal-table' && r.code !== 'ROYAL1' && count > 0) {
+      if (!r.isPrivate && count > 0) {
         list.push({
           id: r.id,
           name: r.name,
@@ -313,6 +270,13 @@ export class GameEngine {
     isPrivate: boolean,
     customSettings?: Partial<RoomSettings>
   ): RoomState {
+    // Ensure the host is cleanly removed from any other table they might have been in
+    for (const [otherRoomId, otherRoom] of this.rooms.entries()) {
+      if (otherRoom.players[hostUser.id]) {
+        this.executePlayerRemoval(otherRoomId, hostUser.id, true);
+      }
+    }
+
     const roomId = `room_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
 
@@ -370,6 +334,13 @@ export class GameEngine {
   ): { success: boolean; room?: RoomState; message?: string; reconnected?: boolean } {
     const room = this.rooms.get(roomId);
     if (!room) return { success: false, message: 'Room does not exist' };
+
+    // Remove user from any OTHER table they may currently be in so they are free to join this table
+    for (const [otherRoomId, otherRoom] of this.rooms.entries()) {
+      if (otherRoomId !== roomId && otherRoom.players[user.id]) {
+        this.leaveRoom(socket, otherRoomId, user.id);
+      }
+    }
 
     // Cancel any scheduled room cleanup timer since player is joining/active
     this.cancelRoomCleanup(roomId);
@@ -488,6 +459,25 @@ export class GameEngine {
       roomState: room,
     });
 
+    // If in payout phase, re-evaluate connected players' votes so disconnected players don't block next round
+    if (room.phase === 'payout') {
+      const connectedPlayerIds = Object.keys(room.players).filter(
+        (id) => !room.players[id].isDisconnected
+      );
+      const allReady =
+        connectedPlayerIds.length > 0 &&
+        connectedPlayerIds.every((id) => (room.nextRoundVotes || []).includes(id));
+      this.io.to(`room:${roomId}`).emit('game:next_round_votes', {
+        votes: room.nextRoundVotes || [],
+        totalPlayers: connectedPlayerIds.length,
+        allReady,
+        voterId: userId,
+      });
+      if (allReady) {
+        this.startNewRound(room);
+      }
+    }
+
     const timerKey = `${roomId}:${userId}`;
     const existing = this.disconnectTimers.get(timerKey);
     if (existing) clearTimeout(existing);
@@ -569,7 +559,7 @@ export class GameEngine {
 
     // Host migration if table owner left/disconnected permanently
     if (room.hostId === userId) {
-      if (remainingPlayerIds.length > 0 && room.id !== 'public-royal-table') {
+      if (remainingPlayerIds.length > 0) {
         // Prefer a currently connected player as the new host
         const connectedCandidate = remainingPlayers.find((p) => !p.isDisconnected);
         const newHostId = connectedCandidate ? connectedCandidate.id : remainingPlayerIds[0];
@@ -580,7 +570,7 @@ export class GameEngine {
 
         this.broadcastSystemChat(
           roomId,
-          `👑 Host privileges transferred to ${room.players[newHostId]?.username || 'patron'}. Game continues!`
+          `👑 Host privileges transferred to ${room.players[newHostId]?.username || 'player'}. Game continues!`
         );
 
         // Emit host migration event to all clients in room
@@ -599,33 +589,25 @@ export class GameEngine {
         ).catch((err) => {
           console.warn('[GameEngine] Failed to sync new host to Supabase:', err);
         });
-      } else if (room.id !== 'public-royal-table') {
-        // Table owner left and 0 players remain: schedule or delete table
-        deleteTableFromSupabase(roomId).catch((err) => {
-          console.warn('[GameEngine] Failed to delete empty table from Supabase:', err);
-        });
+      } else {
+        // Table owner left and 0 players remain: delete table immediately
         this.destroyRoom(roomId);
         this.io.to(`room:${roomId}`).emit('room:player_left', { userId, roomState: room });
         return;
       }
     }
 
-    // If all players left (0 players), delete table from Supabase table
-    if (remainingPlayerIds.length === 0 && room.id !== 'public-royal-table') {
-      deleteTableFromSupabase(roomId).catch((err) => {
-        console.warn('[GameEngine] Failed to delete empty table from Supabase:', err);
-      });
+    // If all players left (0 players remain), delete table row in Supabase and destroy room immediately
+    if (remainingPlayerIds.length === 0) {
       this.destroyRoom(roomId);
       this.io.to(`room:${roomId}`).emit('room:player_left', { userId, roomState: room });
       return;
     }
 
     // Sync updated player count in Supabase
-    if (room.id !== 'public-royal-table') {
-      syncTableStateToSupabaseServer(room).catch((err) => {
-        console.warn('[GameEngine] Failed to sync updated table state to Supabase:', err);
-      });
-    }
+    syncTableStateToSupabaseServer(room).catch((err) => {
+      console.warn('[GameEngine] Failed to sync updated table state to Supabase:', err);
+    });
 
     this.io.to(`room:${roomId}`).emit('room:player_left', { userId, roomState: room });
   }
@@ -849,12 +831,16 @@ export class GameEngine {
       }
     }
 
-    // Sync updated table state to Supabase
-    if (room.id !== 'public-royal-table') {
-      syncTableStateToSupabaseServer(room).catch((err) => {
-        console.warn('[GameEngine] Supabase kick sync notice:', err);
-      });
+    // If no players remain after kick, delete table and destroy room
+    if (remainingPlayerIds.length === 0) {
+      this.destroyRoom(roomId);
+      return { success: true, message: `Player ${targetPlayer.username} removed. Table closed.`, room };
     }
+
+    // Sync updated table state to Supabase
+    syncTableStateToSupabaseServer(room).catch((err) => {
+      console.warn('[GameEngine] Supabase kick sync notice:', err);
+    });
 
     return { success: true, message: `Player ${targetPlayer.username} kicked.`, room };
   }
@@ -1309,7 +1295,7 @@ export class GameEngine {
     return { success: true, allReady, votes: room.nextRoundVotes };
   }
 
-  private destroyRoom(roomId: string) {
+  public destroyRoom(roomId: string) {
     this.cancelRoomCleanup(roomId);
     const interval = this.roomIntervals.get(roomId);
     if (interval) {
@@ -1317,6 +1303,9 @@ export class GameEngine {
       this.roomIntervals.delete(roomId);
     }
     this.rooms.delete(roomId);
+    deleteTableFromSupabase(roomId).catch((err) => {
+      console.warn('[GameEngine] Failed to delete table from Supabase in destroyRoom:', err);
+    });
   }
 
   // --- Real-time Chat & Reactions ---

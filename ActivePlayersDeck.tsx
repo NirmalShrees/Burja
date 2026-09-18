@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { CheckCircle2, Clock, Users, X, Sparkles, Crown, LogOut, Activity, WifiOff } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { CheckCircle2, Clock, Users, X, Sparkles, Crown, LogOut, Activity, WifiOff, Mic, MicOff, Volume2 } from 'lucide-react';
 import { UserAvatar } from './UserAvatar.js';
 import { PlayerSessionStats } from '../types.js';
+import { voiceService, VoiceState } from '../services/voiceService.js';
 
 export interface TablePlayer {
   id: string;
@@ -55,6 +56,14 @@ export const ActivePlayersDeck: React.FC<ActivePlayersDeckProps> = React.memo(({
   isOnline = true,
 }) => {
   const [showRosterModal, setShowRosterModal] = useState(false);
+  const [voiceState, setVoiceState] = useState<VoiceState>(voiceService.getState());
+
+  useEffect(() => {
+    const unsub = voiceService.subscribe((vs) => {
+      setVoiceState(vs);
+    });
+    return () => unsub();
+  }, []);
 
   // Guarantee list has zero duplicates by ID or username
   const uniquePlayers = React.useMemo(() => {
@@ -95,7 +104,7 @@ export const ActivePlayersDeck: React.FC<ActivePlayersDeckProps> = React.memo(({
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
           <span className="font-semibold text-amber-200/90 tracking-wide uppercase text-[9px]">Pavilion Deck</span>
           <span className="text-slate-600">•</span>
-          <span className="text-slate-300 font-bold">{uniquePlayers.length} {uniquePlayers.length === 1 ? 'Patron' : 'Patrons'}</span>
+          <span className="text-slate-300 font-bold">{uniquePlayers.length} {uniquePlayers.length === 1 ? 'Player' : 'Players'}</span>
         </div>
 
         {/* Top Right: Network Ping Indicator above Avatars Panel */}
@@ -239,22 +248,33 @@ export const ActivePlayersDeck: React.FC<ActivePlayersDeckProps> = React.memo(({
           <div
             onClick={handleOpenStats}
             className="flex items-center -space-x-1.5 cursor-pointer group shrink-0"
-            title="Click to view all table patrons and win rates"
+            title="Click to view all table players and win rates"
           >
             {visiblePlayers.map((player) => {
               const isUser = Boolean(player.isUser);
               const isHost = Boolean(player.isHost);
               const isDisconnected = Boolean(player.isDisconnected);
               const hasVotedNext = phase === 'payout' && ((nextRoundVotes || []).includes(player.id) || player.isReady);
+              const isSpeaking = isUser ? (voiceState.isConnected && voiceState.isSpeaking) : Boolean(voiceState.peers[player.id]?.isSpeaking);
+              const isVoiceConnected = isUser ? voiceState.isConnected : Boolean(voiceState.peers[player.id]);
+              const isMuted = isUser ? (voiceState.isConnected && voiceState.isMuted) : Boolean(voiceState.peers[player.id]?.isMuted);
+
               return (
                 <div
                   key={player.id}
                   className={`relative group/avatar ${isHost ? 'z-30' : isUser ? 'z-20' : 'z-10'}`}
-                  title={`${player.username}${isHost ? ' (Table Leader 👑)' : ''}${isDisconnected ? ' (Reconnecting...)' : ''}: ${phase === 'payout' ? (hasVotedNext ? 'Ready for Next Round' : 'Viewing Results') : (player.isReady ? 'Ready' : 'Betting')}${isOwner && player.sessionStats?.winRate !== undefined ? ` • Win Rate: ${player.sessionStats.winRate}%` : ''}`}
+                  title={`${player.username}${isHost ? ' (Table Leader 👑)' : ''}${isSpeaking ? ' (Speaking 🎙️)' : ''}${isDisconnected ? ' (Reconnecting...)' : ''}: ${phase === 'payout' ? (hasVotedNext ? 'Ready for Next Round' : 'Viewing Results') : (player.isReady ? 'Ready' : 'Betting')}${isOwner && player.sessionStats?.winRate !== undefined ? ` • Win Rate: ${player.sessionStats.winRate}%` : ''}`}
                 >
+                  {/* Glowing Green Animated Halo when Player is Speaking */}
+                  {isSpeaking && (
+                    <span className="absolute -inset-1 rounded-full bg-emerald-400/60 animate-ping z-0 pointer-events-none" />
+                  )}
+
                   <div
-                    className={`w-7 h-7 sm:w-7.5 sm:h-7.5 rounded-full flex items-center justify-center text-sm shadow-sm border transition-transform group-hover/avatar:scale-110 overflow-hidden ${
-                      isDisconnected
+                    className={`w-7 h-7 sm:w-7.5 sm:h-7.5 rounded-full flex items-center justify-center text-sm shadow-sm border transition-transform group-hover/avatar:scale-110 overflow-hidden relative z-10 ${
+                      isSpeaking
+                        ? 'bg-emerald-500/30 border-emerald-400 ring-2 ring-emerald-400 shadow-md shadow-emerald-950/80 scale-105'
+                        : isDisconnected
                         ? 'opacity-60 grayscale border-slate-600 bg-slate-900'
                         : isHost
                         ? 'bg-amber-500/30 border-amber-400 ring-2 ring-amber-400 shadow-md shadow-amber-950/80'
@@ -265,6 +285,23 @@ export const ActivePlayersDeck: React.FC<ActivePlayersDeckProps> = React.memo(({
                   >
                     <UserAvatar avatar={player.avatar} name={player.username} size="xs" className="w-full h-full rounded-none" />
                   </div>
+
+                  {/* Voice Status Pill / Speaking Mic */}
+                  {isSpeaking ? (
+                    <span
+                      title="Speaking in Voice Chat 🎙️"
+                      className="absolute -top-1.5 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 border border-slate-950 flex items-center justify-center shadow-lg z-30 animate-pulse"
+                    >
+                      <Mic className="w-2 h-2 text-slate-950" />
+                    </span>
+                  ) : isVoiceConnected && isMuted ? (
+                    <span
+                      title="Microphone Muted"
+                      className="absolute -top-1.5 -right-1 w-3.5 h-3.5 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center shadow z-30"
+                    >
+                      <MicOff className="w-2 h-2 text-rose-400" />
+                    </span>
+                  ) : null}
 
                   {/* Table Leader Crown Badge - Always renders on top of avatar and outline */}
                   {isHost && (
@@ -346,7 +383,7 @@ export const ActivePlayersDeck: React.FC<ActivePlayersDeckProps> = React.memo(({
                   <Users className="w-3.5 h-3.5" />
                 </div>
                 <h3 className="font-serif font-bold text-sm text-amber-100 tracking-wide">
-                  Royal Table Patrons
+                  Royal Table Players
                 </h3>
                 <span className="text-[10px] font-mono text-amber-300/90 bg-amber-500/15 px-1.5 py-0.5 rounded border border-amber-500/30">
                   {players.length}

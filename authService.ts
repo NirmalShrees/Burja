@@ -264,7 +264,7 @@ export async function fetchRemoteLeaderboard(): Promise<any[] | null> {
       return {
         rank: idx + 1,
         id: row.id,
-        username: row.username || 'Festival Patron',
+        username: row.username || 'Festival Player',
         avatar: row.avatar || row.avatar_url || '🎲',
         coins: typeof row.coins === 'number' ? row.coins : 5000,
         totalWinnings: row.total_winnings ?? stats.totalWinnings ?? 0,
