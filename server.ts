@@ -162,9 +162,10 @@ async function startServer() {
 
     socket.on('room:join_random', (payload: { user: any }, callback) => {
       const publicRooms = gameEngine.getPublicRooms();
-      if (publicRooms && publicRooms.length > 0) {
-        // Prefer active public rooms with players
-        const sorted = [...publicRooms].sort((a, b) => b.playerCount - a.playerCount);
+      const availableRooms = (publicRooms || []).filter((r) => r.playerCount < 16);
+      if (availableRooms.length > 0) {
+        // Prefer active public rooms with players that still have open seats
+        const sorted = [...availableRooms].sort((a, b) => b.playerCount - a.playerCount);
         const targetRoomId = sorted[0].id;
         currentRoomId = targetRoomId;
         currentUserId = payload.user.id;
